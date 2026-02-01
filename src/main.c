@@ -665,11 +665,12 @@ static void mqtt_publish_discovery(void) {
     
     static char buf[400];
     
-    // Battery sensor
+    // Battery sensor with state_class for history tracking
     snprintf(buf, sizeof(buf),
         "{\"name\":\"%s\",\"unique_id\":\"epriam_battery\","
         "\"state_topic\":\"homeassistant/sensor/epriam_battery/state\","
-        "\"device_class\":\"battery\",\"unit_of_measurement\":\"%%\","
+        "\"device_class\":\"battery\",\"state_class\":\"measurement\","
+        "\"unit_of_measurement\":\"%%\","
         "\"device\":{\"identifiers\":[\"epriam\"],\"name\":\"%s\",\"manufacturer\":\"Cybex\"}}",
         name_battery, name_device);
     esp_mqtt_client_publish(mqtt_client, "homeassistant/sensor/epriam_battery/config", buf, 0, 0, true);
