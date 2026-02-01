@@ -241,6 +241,7 @@ static int on_status_read(uint16_t ch, const struct ble_gatt_error *e, struct bl
             if (pct > 100) pct = 100;
             battery_percent = pct;
             ESP_LOGI(TAG, "Batt: %d%% (voltage=%d)", battery_percent, voltage);
+            mqtt_publish_state();  // Update HA when battery changes
         }
     }
     return 0;
@@ -257,6 +258,7 @@ static int on_drive_read(uint16_t ch, const struct ble_gatt_error *e, struct ble
         if (l >= 1) {
             drive_mode = d[0];
             ESP_LOGI(TAG, "Mode: %d", drive_mode);
+            mqtt_publish_state();  // Update HA when mode changes
         }
     }
     return 0;
