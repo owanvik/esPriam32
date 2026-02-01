@@ -629,9 +629,11 @@ static void mqtt_publish_state(void) {
     
     char buf[64];
     
-    // Battery sensor
-    snprintf(buf, 64, "%d", battery_percent);
-    esp_mqtt_client_publish(mqtt_client, "homeassistant/sensor/epriam_battery/state", buf, 0, 0, true);
+    // Battery sensor - only publish valid values
+    if (battery_percent >= 0) {
+        snprintf(buf, 64, "%d", battery_percent);
+        esp_mqtt_client_publish(mqtt_client, "homeassistant/sensor/epriam_battery/state", buf, 0, 0, true);
+    }
     
     // Rocking switch state
     esp_mqtt_client_publish(mqtt_client, "homeassistant/switch/epriam_rocking/state", 
