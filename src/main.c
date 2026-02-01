@@ -97,7 +97,7 @@ static volatile int pending_mode = 0;
 static volatile int pending_rock_start = 0;
 static volatile int pending_rock_stop = 0;
 static volatile int rock_minutes = 5;      // 0 = continuous, 1-30 = timer
-static volatile int rock_intensity = 50;   // 0-100%
+static volatile int rock_intensity = 100;  // 0-100%
 
 // Auto-renew rocking mode
 static volatile bool auto_renew_enabled = false;
