@@ -418,6 +418,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 ble_connected = true;
                 ESP_LOGI(TAG, "*** CONNECTED (handle=%d) ***", conn_handle);
                 web_log_add("*** CONNECTED ***");
+                mqtt_publish_state();  // Update HA immediately
                 ble_gattc_disc_all_svcs(conn_handle, on_svc, NULL);
             } else {
                 ESP_LOGE(TAG, "Connect failed: status=%d", event->connect.status);
@@ -442,6 +443,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
             drive_mode_val_handle = 0;
             rocking_val_handle = 0;
             battery_led_val_handle = 0;
+            mqtt_publish_state();  // Update HA immediately
             vTaskDelay(pdMS_TO_TICKS(2000));
             ble_app_scan();
             break;
@@ -717,6 +719,7 @@ static void mqtt_publish_discovery(void) {
     snprintf(buf, sizeof(buf),
         "{\"name\":\"%s\",\"unique_id\":\"epriam_connected\","
         "\"state_topic\":\"homeassistant/binary_sensor/epriam_connected/state\","
+        "\"payload_on\":\"ON\",\"payload_off\":\"OFF\","
         "\"device_class\":\"connectivity\",\"device\":{\"identifiers\":[\"epriam\"]}}",
         name_connected);
     esp_mqtt_client_publish(mqtt_client, "homeassistant/binary_sensor/epriam_connected/config", buf, 0, 0, true);
