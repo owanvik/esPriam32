@@ -4,6 +4,14 @@ A native ESP-IDF firmware for ESP32-C6 that acts as a BLE-to-WiFi bridge for the
 
 ![Web Interface](docs/screenshot.png)
 
+## Introduction
+
+I was getting tired of Cybex never updating their useless app, so I decided to create my own. This lets you integrate your E-Priam to Home Assistant or anything eating MQTT.
+
+Your child will love the **Auto-mode**, because the default max duration on the E-Priam is 30 minutes — the exact same as a baby's sleep cycle. With Auto it will automatically jump back to 30 minutes when it reaches 10 minutes left on the timer.
+
+The config page lets you translate the entity names sent over MQTT. That's just a shortcut for you to be able to push it to HomeKit and say: *"Hey Siri, turn on rocking"*
+
 ## Features
 
 - **BLE Connection** - Automatic discovery and connection to E-Priam stroller
