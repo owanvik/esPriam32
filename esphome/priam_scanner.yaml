@@ -1,0 +1,54 @@
+# ESPHome Cybex E-Priam Scanner
+# Bruk denne for å finne MAC-adressen til din E-Priam
+
+esphome:
+  name: priam-scanner
+  friendly_name: "Priam Scanner"
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  
+  ap:
+    ssid: "priam-scanner-fallback"
+    password: "scanner123"
+
+captive_portal:
+
+logger:
+  level: DEBUG
+
+api:
+
+ota:
+  platform: esphome
+
+# BLE Scanner - logger alle enheter
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+  on_ble_advertise:
+    - lambda: |-
+        // Sjekk for Priam manufacturer data (1933 = 0x0791)
+        for (auto &data : x.get_manufacturer_datas()) {
+          if (data.uuid.get_uuid().uuid.uuid16 == 1933) {
+            ESP_LOGW("priam_scanner", "========================================");
+            ESP_LOGW("priam_scanner", "FANT CYBEX E-PRIAM!");
+            ESP_LOGW("priam_scanner", "MAC-adresse: %s", x.address_str().c_str());
+            ESP_LOGW("priam_scanner", "Navn: %s", x.get_name().c_str());
+            ESP_LOGW("priam_scanner", "RSSI: %d dBm", x.get_rssi());
+            ESP_LOGW("priam_scanner", "========================================");
+            ESP_LOGW("priam_scanner", "Kopier denne MAC-adressen til priam_bridge.yaml!");
+          }
+        }
+
+button:
+  - platform: restart
+    name: "Restart Scanner"
