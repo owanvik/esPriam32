@@ -102,7 +102,7 @@ static volatile int rock_intensity = 50;   // 0-100%
 // Auto-renew rocking mode
 static volatile bool auto_renew_enabled = false;
 static volatile int64_t rock_start_time = 0;
-static volatile int auto_renew_duration = 30;  // 30 min default
+static volatile int auto_renew_duration = 120;  // 2 hours default
 static volatile int auto_renew_threshold = 10; // Renew when 10 min left
 
 // MQTT
@@ -556,6 +556,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             esp_mqtt_client_subscribe(mqtt_client, "homeassistant/select/epriam_mode/set", 0);
             esp_mqtt_client_subscribe(mqtt_client, "homeassistant/switch/epriam_autorenew/set", 0);
             esp_mqtt_client_subscribe(mqtt_client, "homeassistant/number/epriam_intensity/set", 0);
+            esp_mqtt_client_subscribe(mqtt_client, "homeassistant/select/epriam_duration/set", 0);
             // Publish current state
             mqtt_publish_state();
             break;
@@ -606,6 +607,16 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
                     if (i >= 0 && i <= 100) rock_intensity = i;
                     mqtt_publish_state();
                 }
+                else if (strstr(topic, "duration/set")) {
+                    if (strcmp(payload, "30 min") == 0) auto_renew_duration = 30;
+                    else if (strcmp(payload, "1 hour") == 0) auto_renew_duration = 60;
+                    else if (strcmp(payload, "1.5 hours") == 0) auto_renew_duration = 90;
+                    else if (strcmp(payload, "2 hours") == 0) auto_renew_duration = 120;
+                    else if (strcmp(payload, "2.5 hours") == 0) auto_renew_duration = 150;
+                    else if (strcmp(payload, "3 hours") == 0) auto_renew_duration = 180;
+                    ESP_LOGI(TAG, "Duration set to %d min", auto_renew_duration);
+                    mqtt_publish_state();
+                }
             }
             break;
         default:
@@ -633,6 +644,15 @@ static void mqtt_publish_state(void) {
     // Mode select state
     const char* mode = drive_mode == 1 ? "ECO" : drive_mode == 2 ? "TOUR" : drive_mode == 3 ? "BOOST" : "UNKNOWN";
     esp_mqtt_client_publish(mqtt_client, "homeassistant/select/epriam_mode/state", mode, 0, 0, true);
+    
+    // Duration select state
+    const char* dur = auto_renew_duration == 30 ? "30 min" :
+                      auto_renew_duration == 60 ? "1 hour" :
+                      auto_renew_duration == 90 ? "1.5 hours" :
+                      auto_renew_duration == 120 ? "2 hours" :
+                      auto_renew_duration == 150 ? "2.5 hours" :
+                      auto_renew_duration == 180 ? "3 hours" : "2 hours";
+    esp_mqtt_client_publish(mqtt_client, "homeassistant/select/epriam_duration/state", dur, 0, 0, true);
     
     // Intensity number
     snprintf(buf, 64, "%d", rock_intensity);
@@ -704,6 +724,15 @@ static void mqtt_publish_discovery(void) {
         "\"device\":{\"identifiers\":[\"epriam\"]}}",
         name_mode);
     esp_mqtt_client_publish(mqtt_client, "homeassistant/select/epriam_mode/config", buf, 0, 0, true);
+    
+    // Duration select
+    snprintf(buf, sizeof(buf),
+        "{\"name\":\"Duration\",\"unique_id\":\"epriam_duration\","
+        "\"state_topic\":\"homeassistant/select/epriam_duration/state\","
+        "\"command_topic\":\"homeassistant/select/epriam_duration/set\","
+        "\"options\":[\"30 min\",\"1 hour\",\"1.5 hours\",\"2 hours\",\"2.5 hours\",\"3 hours\"],"
+        "\"icon\":\"mdi:timer-outline\",\"device\":{\"identifiers\":[\"epriam\"]}}");
+    esp_mqtt_client_publish(mqtt_client, "homeassistant/select/epriam_duration/config", buf, 0, 0, true);
     
     // Intensity slider
     snprintf(buf, sizeof(buf),
@@ -821,9 +850,12 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<div class=c><b class=b style=background:#4CAF50 onclick=\"fetch('/api/mode/eco').then(st)\">ECO</b>"
         "<b class=b style=background:#2196F3 onclick=\"fetch('/api/mode/tour').then(st)\">TOUR</b>"
         "<b class=b style=background:#f44336 onclick=\"fetch('/api/mode/boost').then(st)\">BOOST</b></div>"
-        "<div class=c><b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start').then(st)\">5m</b>"
-        "<b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=15').then(st)\">15m</b>"
-        "<b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=30').then(st)\">30m</b></div>"
+        "<div class=c><b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=30').then(st)\">30m</b>"
+        "<b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=60').then(st)\">1h</b>"
+        "<b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=90').then(st)\">1.5h</b></div>"
+        "<div class=c><b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=120').then(st)\">2h</b>"
+        "<b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=150').then(st)\">2.5h</b>"
+        "<b class=b style=background:#9C27B0 onclick=\"fetch('/api/rock/start?min=180').then(st)\">3h</b></div>"
         "<div class=c><b id=abtn class=b style=background:%s onclick=\"fetch('/api/rock/autorenew').then(st)\">∞ Auto</b>"
         "<b class=b style=background:#666 onclick=\"fetch('/api/rock/stop').then(st)\">Stop</b></div>"
         "<div class=c>%s<a href=/config>⚙ Config</a> <a href=/ota style=float:right>🔄 OTA</a></div>"
