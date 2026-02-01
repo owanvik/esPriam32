@@ -75,6 +75,11 @@ static uint8_t own_addr_type = BLE_OWN_ADDR_PUBLIC;
 static volatile int scan_device_count = 0;
 static volatile int scan_cycle_count = 0;
 static char last_found_name[32] = "";
+
+// Best candidate address (prefer random type=1 over public type=0)
+static ble_addr_t best_priam_addr;
+static bool have_candidate = false;
+static int64_t candidate_found_time = 0;
 static volatile int last_connect_rc = -999;
 static volatile int last_connect_status = -999;
 static volatile int last_write_rc = -999;
@@ -405,6 +410,36 @@ static int on_svc(uint16_t ch, const struct ble_gatt_error *e, const struct ble_
     return 0;
 }
 
+static void connect_to_priam(ble_addr_t *addr) {
+    char addr_str[18];
+    snprintf(addr_str, sizeof(addr_str), "%02X:%02X:%02X:%02X:%02X:%02X",
+        addr->val[5], addr->val[4], addr->val[3], addr->val[2], addr->val[1], addr->val[0]);
+    
+    ESP_LOGI(TAG, "Connecting to %s (type=%d)...", addr_str, addr->type);
+    web_log_add("Connecting to %s (type=%d)...", addr_str, addr->type);
+    
+    memcpy(&priam_addr, addr, sizeof(ble_addr_t));
+    priam_found = true;
+    
+    ble_gap_disc_cancel();
+    
+    service_found = false;
+    chars_discovered = false;
+    status_val_handle = 0;
+    drive_mode_val_handle = 0;
+    rocking_val_handle = 0;
+    battery_led_val_handle = 0;
+    
+    last_connect_rc = ble_gap_connect(own_addr_type, &priam_addr, 30000, NULL, ble_gap_event, NULL);
+    ESP_LOGI(TAG, "ble_gap_connect rc=%d", last_connect_rc);
+    if (last_connect_rc != 0) {
+        ESP_LOGE(TAG, "Connect failed: %d", last_connect_rc);
+        web_log_add("Connect failed: rc=%d", last_connect_rc);
+        priam_found = false;
+        have_candidate = false;
+    }
+}
+
 static int ble_gap_event(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
         case BLE_GAP_EVENT_DISC:
@@ -414,39 +449,37 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     event->disc.addr.val[5], event->disc.addr.val[4],
                     event->disc.addr.val[3], event->disc.addr.val[2],
                     event->disc.addr.val[1], event->disc.addr.val[0]);
-                ESP_LOGI(TAG, "E-Priam addr: %s (type=%d)", addr_str, event->disc.addr.type);
-                web_log_add("Connecting to %s (type=%d)...", addr_str, event->disc.addr.type);
-                memcpy(&priam_addr, &event->disc.addr, sizeof(ble_addr_t));
-                priam_found = true;
+                ESP_LOGI(TAG, "E-Priam candidate: %s (type=%d)", addr_str, event->disc.addr.type);
                 
-                // Cancel scan and connect immediately
-                ble_gap_disc_cancel();
-                
-                // Connect directly without waiting for DISC_COMPLETE
-                ESP_LOGI(TAG, "Connecting immediately to %s...", addr_str);
-                service_found = false;
-                chars_discovered = false;
-                status_val_handle = 0;
-                drive_mode_val_handle = 0;
-                rocking_val_handle = 0;
-                battery_led_val_handle = 0;
-                
-                last_connect_rc = ble_gap_connect(own_addr_type, &priam_addr, 30000, NULL, ble_gap_event, NULL);
-                ESP_LOGI(TAG, "ble_gap_connect rc=%d", last_connect_rc);
-                if (last_connect_rc != 0) {
-                    ESP_LOGE(TAG, "Connect failed immediately: %d", last_connect_rc);
-                    web_log_add("Connect failed: rc=%d", last_connect_rc);
-                    priam_found = false;
+                // Prefer random address (type=1) - connects more reliably
+                if (event->disc.addr.type == 1) {
+                    // Random address found - connect immediately
+                    ESP_LOGI(TAG, "*** Random address - connecting immediately ***");
+                    have_candidate = false;
+                    connect_to_priam((ble_addr_t*)&event->disc.addr);
+                } else if (!have_candidate) {
+                    // Public address - save as fallback, wait for random
+                    ESP_LOGI(TAG, "Public address - saving as fallback");
+                    memcpy(&best_priam_addr, &event->disc.addr, sizeof(ble_addr_t));
+                    have_candidate = true;
+                    candidate_found_time = esp_timer_get_time() / 1000;  // ms
                 }
             }
             break;
         case BLE_GAP_EVENT_DISC_COMPLETE:
-            ESP_LOGI(TAG, "DISC_COMPLETE: reason=%d, priam_found=%d", 
-                event->disc_complete.reason, priam_found);
+            ESP_LOGI(TAG, "DISC_COMPLETE: reason=%d, priam_found=%d, have_candidate=%d", 
+                event->disc_complete.reason, priam_found, have_candidate);
             if (!priam_found && !ble_connected) {
-                ESP_LOGI(TAG, "E-Priam not found, rescanning...");
-                vTaskDelay(pdMS_TO_TICKS(5000));
-                ble_app_scan();
+                if (have_candidate) {
+                    // Try the public address fallback
+                    ESP_LOGI(TAG, "Trying fallback public address...");
+                    connect_to_priam(&best_priam_addr);
+                    have_candidate = false;
+                } else {
+                    ESP_LOGI(TAG, "E-Priam not found, rescanning...");
+                    vTaskDelay(pdMS_TO_TICKS(3000));
+                    ble_app_scan();
+                }
             }
             break;
         case BLE_GAP_EVENT_CONNECT:
@@ -515,6 +548,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
             conn_handle = BLE_HS_CONN_HANDLE_NONE;
             ble_connected = false;
             priam_found = false;
+            have_candidate = false;
             chars_discovered = false;
             battery_percent = -1;
             battery_leds = -1;
@@ -545,6 +579,7 @@ static void ble_app_scan(void) {
     };
     scan_cycle_count++;
     scan_device_count = 0;
+    have_candidate = false;
     ESP_LOGI(TAG, "Scan cycle #%d starting (30s)...", scan_cycle_count);
     web_log_add("Scan #%d started...", scan_cycle_count);
     priam_found = false;
