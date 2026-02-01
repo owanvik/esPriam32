@@ -231,6 +231,11 @@ static int on_status_read(uint16_t ch, const struct ble_gatt_error *e, struct bl
         uint16_t l = OS_MBUF_PKTLEN(a->om);
         if (l > 20) l = 20;
         os_mbuf_copydata(a->om, 0, l, d);
+        
+        // Log all bytes for analysis
+        ESP_LOGI(TAG, "STATUS raw len=%d: [%02X %02X %02X %02X %02X %02X %02X %02X]", 
+            l, d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
+        
         if (l >= 4) {
             // Battery calculation from python-priam:
             // voltage = d[3] * 2 (in decivolts, e.g. 350 = 35.0V)
@@ -289,8 +294,7 @@ static void read_all_characteristics(void) {
     if (!ble_connected || !chars_discovered) return;
     if (status_val_handle) ble_gattc_read(conn_handle, status_val_handle, on_status_read, NULL);
     vTaskDelay(pdMS_TO_TICKS(100));
-    if (drive_mode_val_handle) ble_gattc_read(conn_handle, drive_mode_val_handle, on_drive_read, NULL);
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // Note: drive_mode is write-only, cannot be read
     if (battery_led_val_handle) ble_gattc_read(conn_handle, battery_led_val_handle, on_led_read, NULL);
 }
 
@@ -304,8 +308,11 @@ static void process_pending_commands(void) {
         ESP_LOGI(TAG, "Writing mode %d to handle %d (conn=%d)", m, drive_mode_val_handle, conn_handle);
         last_write_rc = ble_gattc_write_flat(conn_handle, drive_mode_val_handle, &m, 1, on_write, NULL);
         ESP_LOGI(TAG, "Write rc=%d", last_write_rc);
-        vTaskDelay(pdMS_TO_TICKS(500));
-        ble_gattc_read(conn_handle, drive_mode_val_handle, on_drive_read, NULL);
+        if (last_write_rc == 0) {
+            drive_mode = m;  // Update local state on successful write
+            mqtt_publish_state();
+        }
+        vTaskDelay(pdMS_TO_TICKS(300));
     }
     if (pending_rock_start && rocking_val_handle) {
         pending_rock_start = 0;
