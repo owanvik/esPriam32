@@ -290,12 +290,42 @@ static int on_write(uint16_t ch, const struct ble_gatt_error *e, struct ble_gatt
     return 0;
 }
 
+static void subscribe_to_notifications(void) {
+    if (!ble_connected) return;
+    
+    // Subscribe to STATUS notifications (handle + 1 is typically CCCD)
+    if (status_val_handle) {
+        uint8_t val[2] = {0x01, 0x00};  // Enable notifications
+        ble_gattc_write_flat(conn_handle, status_val_handle + 1, val, 2, NULL, NULL);
+        ESP_LOGI(TAG, "Subscribed to STATUS notify");
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Subscribe to DRIVE MODE notifications
+    if (drive_mode_val_handle) {
+        uint8_t val[2] = {0x01, 0x00};
+        ble_gattc_write_flat(conn_handle, drive_mode_val_handle + 1, val, 2, NULL, NULL);
+        ESP_LOGI(TAG, "Subscribed to MODE notify");
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Subscribe to ROCKING notifications
+    if (rocking_val_handle) {
+        uint8_t val[2] = {0x01, 0x00};
+        ble_gattc_write_flat(conn_handle, rocking_val_handle + 1, val, 2, NULL, NULL);
+        ESP_LOGI(TAG, "Subscribed to ROCK notify");
+    }
+}
+
 static void read_all_characteristics(void) {
     if (!ble_connected || !chars_discovered) return;
     if (status_val_handle) ble_gattc_read(conn_handle, status_val_handle, on_status_read, NULL);
     vTaskDelay(pdMS_TO_TICKS(100));
-    // Note: drive_mode is write-only, cannot be read
     if (battery_led_val_handle) ble_gattc_read(conn_handle, battery_led_val_handle, on_led_read, NULL);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    
+    // Subscribe to notifications for live updates
+    subscribe_to_notifications();
 }
 
 static void process_pending_commands(void) {
@@ -437,6 +467,48 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 ble_app_scan();
             }
             break;
+        case BLE_GAP_EVENT_NOTIFY_RX: {
+            uint16_t attr_handle = event->notify_rx.attr_handle;
+            struct os_mbuf *om = event->notify_rx.om;
+            uint8_t data[32];
+            uint16_t len = OS_MBUF_PKTLEN(om);
+            if (len > 32) len = 32;
+            os_mbuf_copydata(om, 0, len, data);
+            
+            ESP_LOGI(TAG, "NOTIFY handle=%d len=%d: [%02X %02X %02X %02X %02X]",
+                attr_handle, len, data[0], len>1?data[1]:0, len>2?data[2]:0, len>3?data[3]:0, len>4?data[4]:0);
+            
+            if (attr_handle == status_val_handle && len >= 4) {
+                // Parse STATUS notification (same as on_status_read)
+                int voltage = data[3] * 2;  // decivolts
+                int percent = ((voltage - 315) * 100) / 65;
+                if (percent < 0) percent = 0;
+                if (percent > 100) percent = 100;
+                if (battery_percent != percent) {
+                    battery_percent = percent;
+                    ESP_LOGI(TAG, "Battery notify: %d%%", battery_percent);
+                    mqtt_publish_state();
+                }
+            } else if (attr_handle == drive_mode_val_handle && len >= 1) {
+                // Parse DRIVE MODE notification
+                int mode = data[0];
+                if (mode >= 1 && mode <= 3 && drive_mode != mode) {
+                    drive_mode = mode;
+                    ESP_LOGI(TAG, "Mode notify: %d", drive_mode);
+                    mqtt_publish_state();
+                }
+            } else if (attr_handle == rocking_val_handle && len >= 3) {
+                // Parse ROCKING notification
+                // intensity = data[0] & 0xF, time_left = data[1] | (data[2] << 8)
+                int intensity = data[0] & 0x0F;
+                int time_left = data[1] | (data[2] << 8);
+                bool was_rocking = is_rocking;
+                is_rocking = (intensity > 0 || time_left > 0);
+                ESP_LOGI(TAG, "Rock notify: intensity=%d, time_left=%d", intensity, time_left);
+                if (is_rocking != was_rocking) mqtt_publish_state();
+            }
+            break;
+        }
         case BLE_GAP_EVENT_DISCONNECT:
             ESP_LOGI(TAG, "DISCONNECT: reason=0x%04X", event->disconnect.reason);
             web_log_add("Disconnected: 0x%04X", event->disconnect.reason);
