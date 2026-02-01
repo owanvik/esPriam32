@@ -1176,23 +1176,28 @@ static esp_err_t api_disconnect(httpd_req_t *req) {
 
 // Config page - entity name settings
 static esp_err_t config_handler(httpd_req_t *req) {
-    static char html[2048];
+    static char html[3072];
     snprintf(html, sizeof(html),
         "<!DOCTYPE html><html><head><meta charset=UTF-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
-        "<title>Config</title><style>*{box-sizing:border-box}body{font-family:Arial;max-width:400px;margin:auto;padding:10px;background:#1a1a2e;color:#eee}"
+        "<title>Configuration</title><style>*{box-sizing:border-box}body{font-family:Arial;max-width:400px;margin:auto;padding:10px;background:#1a1a2e;color:#eee}"
         "input{width:100%%;padding:8px;margin:4px 0;border-radius:4px;border:1px solid #444;background:#16213e;color:#eee}"
         ".b{padding:12px 20px;margin:10px 0;border:none;border-radius:6px;cursor:pointer;background:#4CAF50;color:white;width:100%%}"
-        "</style></head><body><h2>Innstillinger</h2>"
+        ".info{background:#16213e;padding:12px;border-radius:6px;margin-bottom:15px;font-size:13px;line-height:1.5}"
+        "label{display:block;margin-top:10px;font-size:13px;color:#888}"
+        "</style></head><body><h2>⚙️ Configuration</h2>"
+        "<div class=info>These names are used for Home Assistant MQTT discovery. "
+        "Change them to customize how entities appear in HA. For example, use your language or add room names. "
+        "Changes take effect after saving and will update entity names in Home Assistant.</div>"
         "<form action=/api/config method=POST>"
-        "<label>Enhetsnavn:</label><input name=device value=\"%s\">"
-        "<label>Batteri:</label><input name=battery value=\"%s\">"
-        "<label>Vugging:</label><input name=rocking value=\"%s\">"
-        "<label>Auto-forny:</label><input name=autorenew value=\"%s\">"
-        "<label>Modus:</label><input name=mode value=\"%s\">"
-        "<label>Intensitet:</label><input name=intensity value=\"%s\">"
-        "<label>Tilkoblet:</label><input name=connected value=\"%s\">"
-        "<button class=b type=submit>Lagre</button></form>"
-        "<a href=/><button class=b style=background:#666>Tilbake</button></a></body></html>",
+        "<label>Device name:</label><input name=device value=\"%s\" placeholder=\"e.g. Cybex E-Priam\">"
+        "<label>Battery sensor:</label><input name=battery value=\"%s\" placeholder=\"e.g. Battery\">"
+        "<label>Rocking switch:</label><input name=rocking value=\"%s\" placeholder=\"e.g. Rocking\">"
+        "<label>Auto-renew switch:</label><input name=autorenew value=\"%s\" placeholder=\"e.g. Auto-renew\">"
+        "<label>Drive mode select:</label><input name=mode value=\"%s\" placeholder=\"e.g. Mode\">"
+        "<label>Intensity number:</label><input name=intensity value=\"%s\" placeholder=\"e.g. Intensity\">"
+        "<label>Connection status:</label><input name=connected value=\"%s\" placeholder=\"e.g. Connected\">"
+        "<button class=b type=submit>💾 Save</button></form>"
+        "<a href=/><button class=b style=background:#666>← Back</button></a></body></html>",
         name_device, name_battery, name_rocking, name_autorenew, name_mode, name_intensity, name_connected);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
@@ -1310,15 +1315,15 @@ static esp_err_t ota_page_handler(httpd_req_t *req) {
         "<div class=c><form id=f><input type=file name=fw id=fw accept='.bin'><br>"
         "<div id=p style='display:none'><div id=pb></div></div>"
         "<div id=st></div><br><button type=submit class=b>Upload Firmware</button></form></div>"
-        "<div class=c><a href='/'>← Tilbake</a></div>"
+        "<div class=c><a href='/'>← Back</a></div>"
         "<script>"
         "document.getElementById('f').onsubmit=async e=>{"
-        "e.preventDefault();let f=document.getElementById('fw').files[0];if(!f)return alert('Velg fil');"
-        "document.getElementById('p').style.display='block';document.getElementById('st').textContent='Laster opp...';"
+        "e.preventDefault();let f=document.getElementById('fw').files[0];if(!f)return alert('Select a file');"
+        "document.getElementById('p').style.display='block';document.getElementById('st').textContent='Uploading...';"
         "let xhr=new XMLHttpRequest();xhr.open('POST','/api/ota',true);"
         "xhr.upload.onprogress=e=>{if(e.lengthComputable){let p=Math.round(e.loaded/e.total*100);document.getElementById('pb').style.width=p+'%';document.getElementById('st').textContent=p+'%';}};"
-        "xhr.onload=()=>{if(xhr.status==200){document.getElementById('st').textContent='OK! Restarter...';setTimeout(()=>location.href='/',5000);}else{document.getElementById('st').textContent='Feil: '+xhr.responseText;}};"
-        "xhr.onerror=()=>{document.getElementById('st').textContent='Nettverksfeil';};"
+        "xhr.onload=()=>{if(xhr.status==200){document.getElementById('st').textContent='OK! Restarting...';setTimeout(()=>location.href='/',5000);}else{document.getElementById('st').textContent='Error: '+xhr.responseText;}};"
+        "xhr.onerror=()=>{document.getElementById('st').textContent='Network error';};"
         "xhr.send(f);};"
         "</script></body></html>";
     httpd_resp_set_type(req, "text/html");
