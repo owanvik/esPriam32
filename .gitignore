@@ -1,12 +1,32 @@
-# Secrets
-secrets.yaml
+# .gitignore for ESP32-C6 PlatformIO project
 
-# ESPHome build cache
-.esphome/
+# Build output
+.pio/
+build/
 
-# macOS
+# IDE settings
+.vscode/
+.idea/
+
+# OS files
 .DS_Store
+Thumbs.db
 
-# Python
-__pycache__/
-*.pyc
+# Compiled files
+*.o
+*.obj
+*.elf
+*.bin
+*.map
+
+# Backup files
+*~
+*.bak
+*.swp
+
+# Log files
+*.log
+
+# Local config (contains WiFi/MQTT credentials)
+# Uncomment if you want to keep your credentials private:
+# src/config.h
