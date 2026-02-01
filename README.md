@@ -1,6 +1,10 @@
 # esPriam32
 
-A native ESP-IDF firmware for ESP32-C6 that acts as a BLE-to-WiFi bridge for the Cybex E-Priam stroller, enabling control via a web interface and Home Assistant integration.
+> **ESP32-C6 Smart Control for Cybex E-Priam Stroller** — Home Assistant integration, extended rocking timer, and OTA updates
+
+A native ESP-IDF firmware for ESP32-C6 that acts as a BLE-to-WiFi bridge for the Cybex E-Priam electric stroller. Control rocking, drive modes (ECO/TOUR/BOOST), and monitor battery via Home Assistant, MQTT, or a beautiful web interface.
+
+**Keywords:** Cybex E-Priam, smart stroller, baby tech, ESP32 BLE, Home Assistant stroller, MQTT baby monitor, electric pram hack, nursery automation
 
 ![Web Interface](docs/screenshot.png)
 
