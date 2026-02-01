@@ -15,9 +15,10 @@ The config page lets you translate the entity names sent over MQTT. That's just 
 ## Features
 
 - **BLE Connection** - Automatic discovery and connection to E-Priam stroller
+- **BLE Notifications** - Real-time updates from stroller (battery, status)
 - **Web Interface** - Beautiful mobile-friendly control panel
 - **Home Assistant** - Full MQTT integration with auto-discovery
-- **Rocking Control** - 5/15/30 minute timers with countdown display
+- **Rocking Control** - 30min to 3 hour duration options with countdown
 - **Auto-Renew Mode** - Continuous rocking that auto-renews before timeout
 - **Battery Monitoring** - Real-time battery percentage from stroller
 - **Drive Modes** - ECO, TOUR, BOOST mode switching

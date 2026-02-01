@@ -56,10 +56,11 @@ static bool ble_connected = false;
 static bool mqtt_connected = false;
 static bool is_rocking = false;
 static bool auto_renew_enabled = false;
-static int battery_percent = 0;
-static int drive_mode = 1;  // 1=ECO, 2=TOUR, 3=BOOST
-static int rock_intensity = 50;
+static int battery_percent = -1;  // -1 = unknown
+static int drive_mode = -1;       // 1=ECO, 2=TOUR, 3=BOOST, -1=unknown
+static int rock_intensity = 100;  // 0-100% (default 100)
 static int rock_minutes = 0;
+static int auto_renew_duration = 120;  // 2 hours default
 static int64_t rock_start_time = 0;
 ```
 
@@ -69,10 +70,14 @@ Service UUID: `a1fc0101-78d3-40c2-9b6f-3c5f7b2797df`
 
 | Handle | UUID Suffix | Description |
 |--------|-------------|-------------|
-| ~115 | 0102 | Status (read) |
-| ~118 | 0103 | Drive mode (read/write): 1=ECO, 2=TOUR, 3=BOOST |
-| ~120 | 0104 | Rocking (write): [0x01, min, intensity%] or [0x00] |
+| ~114 | 0102 | Status (read/notify): battery voltage at byte[3] |
+| ~117 | 0103 | Drive mode (write-only): 1=ECO, 2=TOUR, 3=BOOST |
+| ~120 | 0104 | Rocking (write/notify): [0x01, min, intensity%] or [0x00] |
 | ~123 | 0105 | Battery LEDs (read): 1-3 |
+
+**Note:** Drive mode is write-only - cannot be read back. The firmware tracks mode locally after successful write.
+
+**BLE Notifications:** The firmware subscribes to STATUS and ROCKING notifications for real-time updates (~1/sec).
 
 ### Rocking Command Format
 ```c
@@ -98,6 +103,7 @@ Discovery prefix: `homeassistant/`
 | Rocking | switch/epriam_rocking | Switch |
 | Auto-renew | switch/epriam_autorenew | Switch |
 | Mode | select/epriam_mode | Select |
+| Duration | select/epriam_duration | Select |
 | Intensity | number/epriam_intensity | Number |
 | Connected | binary_sensor/epriam_connected | Binary Sensor |
 | Remaining | sensor/epriam_remaining | Sensor |
@@ -148,6 +154,8 @@ The HTML is embedded as C strings in `root_handler()`. Use minimal HTML/CSS for 
 - Move ESP32 closer (< 3m recommended)
 - Check that stroller isn't connected to phone app
 - Press "Scan" button in web UI
+- **Address preference:** Firmware prefers random addresses (type=1) over public (type=0)
+- **After using Cybex app:** May need to reset stroller (lower/raise handlebar, power cycle)
 
 ### MQTT Not Working
 - Verify broker IP/credentials in `main.c`
@@ -175,7 +183,7 @@ Entity names can be customized via web UI at `/config` and are stored in NVS.
 ## Memory Considerations
 
 Current usage:
-- RAM: ~16% (53KB of 328KB)
-- Flash: ~33% (1.4MB of 4MB)
+- RAM: ~17% (55KB of 328KB)
+- Flash: ~70% (1.4MB of 2MB per OTA partition)
 
 Keep web UI HTML minimal. Avoid large buffers.
