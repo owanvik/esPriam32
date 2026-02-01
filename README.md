@@ -249,8 +249,8 @@ The E-Priam uses a Microchip RN4871 BLE module.
 
 | Characteristic | UUID Suffix | Description |
 |----------------|-------------|-------------|
-| Status | 0102 | Read status |
-| Drive Mode | 0103 | R/W: 1=ECO, 2=TOUR, 3=BOOST |
+| Status | 0102 | Read status bytes |
+| Drive Mode | 0103 | Write-only: 1=ECO, 2=TOUR, 3=BOOST |
 | Rocking | 0104 | Write: [0x01, minutes, intensity%] or [0x00] |
 | Battery LED | 0105 | Read: LED count (1-3) |
 
@@ -270,6 +270,23 @@ Stop:  [0x00]
 RAM:   ~15% (50KB of 328KB)
 Flash: ~33% (1.4MB of 4MB)
 ```
+
+## Troubleshooting
+
+### E-Priam Won't Connect
+
+If the ESP32 keeps failing to connect with `reason=0x3E`, the stroller may need a reset:
+
+1. Lower the handle bar from fully extended to the lowest position
+2. Extend the handle bar back to fully extended
+3. Turn the E-Priam off
+4. Turn the E-Priam on
+
+This typically happens after using the official Cybex app, which can leave the stroller's BLE in an unresponsive state.
+
+### Drive Mode Characteristic
+
+The drive mode characteristic (0x0103) is **write-only** — it cannot be read. The firmware tracks the mode locally after sending a write command.
 
 ## Configuration
 
