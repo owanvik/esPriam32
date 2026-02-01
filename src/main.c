@@ -232,8 +232,15 @@ static int on_status_read(uint16_t ch, const struct ble_gatt_error *e, struct bl
         if (l > 20) l = 20;
         os_mbuf_copydata(a->om, 0, l, d);
         if (l >= 4) {
-            battery_percent = (d[3] * 100) / 255;
-            ESP_LOGI(TAG, "Batt: %d%%", battery_percent);
+            // Battery calculation from python-priam:
+            // voltage = d[3] * 2 (in decivolts, e.g. 350 = 35.0V)
+            // percentage = (voltage - 315) / (380 - 315) * 100
+            int voltage = (d[3] & 0xFF) * 2;
+            int pct = ((voltage - 315) * 100) / 65;  // 65 = 380 - 315
+            if (pct < 0) pct = 0;
+            if (pct > 100) pct = 100;
+            battery_percent = pct;
+            ESP_LOGI(TAG, "Batt: %d%% (voltage=%d)", battery_percent, voltage);
         }
     }
     return 0;
