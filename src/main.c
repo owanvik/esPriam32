@@ -107,9 +107,11 @@ static volatile int rock_intensity = 100;  // 0-100%
 // Auto-renew rocking mode
 #define AUTO_START_MINUTES 30
 #define PENDING_COMMAND_RETRY_INTERVAL_MS 3000
+#define ROCK_NOTIFY_TIMEOUT_SEC 15
 
 static volatile bool auto_renew_enabled = false;
 static volatile int64_t rock_start_time = 0;
+static volatile int64_t last_rock_notify_time = 0;
 static volatile int auto_renew_duration = 120;  // 2 hours default
 static volatile int auto_renew_threshold = 10; // Renew when 10 min left
 static bool autostart_enabled = false;
@@ -435,6 +437,7 @@ static void process_pending_commands(void) {
             pending_rock_start = 0;
             is_rocking = true;
             rock_start_time = esp_timer_get_time() / 1000000;  // Set start time in seconds
+            last_rock_notify_time = rock_start_time;
         } else {
             web_log_add("Rock start busy: rc=%d", last_write_rc);
         }
@@ -626,6 +629,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 int time_left = data[1] | (data[2] << 8);
                 bool was_rocking = is_rocking;
                 is_rocking = (intensity > 0 || time_left > 0);
+                last_rock_notify_time = esp_timer_get_time() / 1000000;
                 ESP_LOGI(TAG, "Rock notify: intensity=%d, time_left=%d", intensity, time_left);
                 if (is_rocking != was_rocking) mqtt_publish_state();
             }
@@ -732,6 +736,15 @@ static void auto_renew_task(void *arg) {
             int remaining = (auto_renew_duration * 60) - (int)elapsed;
             
             ESP_LOGI(TAG, "Auto-renew check: elapsed=%llds, remaining=%ds", elapsed, remaining);
+
+            if (last_rock_notify_time > 0 && (now - last_rock_notify_time) > ROCK_NOTIFY_TIMEOUT_SEC) {
+                ESP_LOGW(TAG, "No rock notifications for %llds, retrying start", now - last_rock_notify_time);
+                web_log_add("Rock notify timeout, retrying");
+                last_rock_notify_time = now;
+                pending_rock_start = 1;
+                process_pending_commands();
+                mqtt_publish_state();
+            }
             
             // Renew when threshold minutes remaining
             if (remaining <= (auto_renew_threshold * 60) && remaining > 0) {
