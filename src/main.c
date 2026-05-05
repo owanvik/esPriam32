@@ -379,7 +379,14 @@ static void read_led_or_subscribe(void) {
 static void finish_initial_reads(void) {
     if (!ble_connected || !chars_discovered) return;
     subscribe_to_notifications();
-    process_pending_commands();
+    if (autostart_enabled && !auto_start_sent) {
+        auto_start_sent = true;
+        rock_intensity = clamp_int(autostart_intensity, 0, 100);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        start_auto_renew_rocking("BLE connect");
+    } else {
+        process_pending_commands();
+    }
 }
 
 static void start_auto_renew_rocking(const char *source) {
@@ -467,11 +474,6 @@ static int on_chr(uint16_t ch, const struct ble_gatt_error *e, const struct ble_
             chars_discovered = true;
             vTaskDelay(pdMS_TO_TICKS(200));
             read_all_characteristics();
-            if (autostart_enabled && !auto_start_sent) {
-                auto_start_sent = true;
-                rock_intensity = clamp_int(autostart_intensity, 0, 100);
-                start_auto_renew_rocking("BLE connect");
-            }
         }
     }
     return 0;
