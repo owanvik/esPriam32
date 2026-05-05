@@ -165,6 +165,7 @@ static void load_entity_names(void);
 static void save_entity_names(void);
 static void save_drive_mode(void);
 static void start_auto_renew_rocking(const char *source);
+static void wifi_services_task(void *arg);
 
 static int clamp_int(int value, int min, int max) {
     if (value < min) return min;
@@ -1568,6 +1569,13 @@ static void start_webserver(void) {
     }
 }
 
+static void wifi_services_task(void *arg) {
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+    start_webserver();
+    mqtt_init();
+    vTaskDelete(NULL);
+}
+
 void app_main(void) {
     ESP_LOGI(TAG, "E-Priam Bridge v2.1 + MQTT");
     esp_err_t ret = nvs_flash_init();
@@ -1577,14 +1585,12 @@ void app_main(void) {
     }
     load_entity_names();
     wifi_init();
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    start_webserver();
-    mqtt_init();
     ble_init();
     
     // Start auto-renew monitoring task
     xTaskCreate(auto_renew_task, "autorenew", 2048, NULL, 5, NULL);
     xTaskCreate(pending_command_retry_task, "cmdretry", 2048, NULL, 5, NULL);
+    xTaskCreate(wifi_services_task, "wifisvc", 4096, NULL, 5, NULL);
     
     ESP_LOGI(TAG, "Ready!");
 }
