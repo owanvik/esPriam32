@@ -105,10 +105,19 @@ static volatile int rock_minutes = 5;      // 0 = continuous, 1-30 = timer
 static volatile int rock_intensity = 100;  // 0-100%
 
 // Auto-renew rocking mode
+#define AUTO_START_MINUTES 30
+#define PENDING_COMMAND_RETRY_INTERVAL_MS 3000
+#define ROCK_NOTIFY_TIMEOUT_SEC 15
+
 static volatile bool auto_renew_enabled = false;
 static volatile int64_t rock_start_time = 0;
+static volatile int64_t last_rock_notify_time = 0;
 static volatile int auto_renew_duration = 120;  // 2 hours default
 static volatile int auto_renew_threshold = 10; // Renew when 10 min left
+static bool autostart_enabled = false;
+static int autostart_intensity = 50;
+static bool auto_start_sent = false;
+static volatile bool processing_commands = false;
 
 // MQTT
 static esp_mqtt_client_handle_t mqtt_client = NULL;
@@ -142,15 +151,29 @@ static EventGroupHandle_t s_wifi_event_group;
 #define WIFI_CONNECTED_BIT BIT0
 static httpd_handle_t server = NULL;
 
+static int clamp_int(int value, int min, int max);
 static void ble_app_scan(void);
 static int ble_gap_event(struct ble_gap_event *event, void *arg);
 static void read_all_characteristics(void);
+static void read_drive_or_led_or_subscribe(void);
+static void read_led_or_subscribe(void);
+static void finish_initial_reads(void);
 static void process_pending_commands(void);
 static void mqtt_publish_state(void);
 static void mqtt_publish_discovery(void);
 static void auto_renew_task(void *arg);
+static void pending_command_retry_task(void *arg);
 static void load_entity_names(void);
 static void save_entity_names(void);
+static void save_drive_mode(void);
+static void start_auto_renew_rocking(const char *source);
+static void wifi_services_task(void *arg);
+
+static int clamp_int(int value, int min, int max) {
+    if (value < min) return min;
+    if (value > max) return max;
+    return value;
+}
 
 static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -254,23 +277,26 @@ static int on_status_read(uint16_t ch, const struct ble_gatt_error *e, struct bl
             mqtt_publish_state();  // Update HA when battery changes
         }
     }
+    read_drive_or_led_or_subscribe();
     return 0;
 }
 
 static int on_drive_read(uint16_t ch, const struct ble_gatt_error *e, struct ble_gatt_attr *a, void *arg) {
     ESP_LOGI(TAG, "on_drive_read: status=%d", e->status);
     if (e->status == 0 && a) {
-        uint8_t d[8];
+        uint8_t d[8] = {0};
         uint16_t l = OS_MBUF_PKTLEN(a->om);
         if (l > 8) l = 8;
         os_mbuf_copydata(a->om, 0, l, d);
         ESP_LOGI(TAG, "Mode raw: len=%d, [%02X %02X %02X %02X]", l, d[0], d[1], d[2], d[3]);
-        if (l >= 1) {
+        if (l >= 1 && d[0] >= 1 && d[0] <= 3) {
             drive_mode = d[0];
             ESP_LOGI(TAG, "Mode: %d", drive_mode);
+            save_drive_mode();
             mqtt_publish_state();  // Update HA when mode changes
         }
     }
+    read_led_or_subscribe();
     return 0;
 }
 
@@ -285,7 +311,7 @@ static int on_led_read(uint16_t ch, const struct ble_gatt_error *e, struct ble_g
             ESP_LOGI(TAG, "LEDs: %d", battery_leds);
         }
     }
-    process_pending_commands();
+    finish_initial_reads();
     return 0;
 }
 
@@ -324,46 +350,110 @@ static void subscribe_to_notifications(void) {
 
 static void read_all_characteristics(void) {
     if (!ble_connected || !chars_discovered) return;
-    if (status_val_handle) ble_gattc_read(conn_handle, status_val_handle, on_status_read, NULL);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    if (battery_led_val_handle) ble_gattc_read(conn_handle, battery_led_val_handle, on_led_read, NULL);
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // Subscribe to notifications for live updates
+    if (status_val_handle) {
+        int rc = ble_gattc_read(conn_handle, status_val_handle, on_status_read, NULL);
+        ESP_LOGI(TAG, "Status read rc=%d", rc);
+        if (rc == 0) return;
+    }
+    read_drive_or_led_or_subscribe();
+}
+
+static void read_drive_or_led_or_subscribe(void) {
+    if (!ble_connected || !chars_discovered) return;
+    if (drive_mode_val_handle) {
+        int rc = ble_gattc_read(conn_handle, drive_mode_val_handle, on_drive_read, NULL);
+        ESP_LOGI(TAG, "Mode read rc=%d", rc);
+        if (rc == 0) return;
+    }
+    read_led_or_subscribe();
+}
+
+static void read_led_or_subscribe(void) {
+    if (!ble_connected || !chars_discovered) return;
+    if (battery_led_val_handle) {
+        int rc = ble_gattc_read(conn_handle, battery_led_val_handle, on_led_read, NULL);
+        ESP_LOGI(TAG, "LED read rc=%d", rc);
+        if (rc == 0) return;
+    }
+    finish_initial_reads();
+}
+
+static void finish_initial_reads(void) {
+    if (!ble_connected || !chars_discovered) return;
     subscribe_to_notifications();
+    if (autostart_enabled && !auto_start_sent) {
+        auto_start_sent = true;
+        rock_intensity = clamp_int(autostart_intensity, 0, 100);
+        vTaskDelay(pdMS_TO_TICKS(500));
+        start_auto_renew_rocking("BLE connect");
+    } else {
+        process_pending_commands();
+    }
+}
+
+static void start_auto_renew_rocking(const char *source) {
+    rock_minutes = AUTO_START_MINUTES;
+    auto_renew_duration = AUTO_START_MINUTES;
+    auto_renew_enabled = true;
+    pending_rock_stop = 0;
+    pending_rock_start = 1;
+    ESP_LOGI(TAG, "Auto mode start from %s: %d min, %d%%", source, rock_minutes, rock_intensity);
+    web_log_add("Auto mode start: %s", source);
+    if (ble_connected && chars_discovered) process_pending_commands();
+    mqtt_publish_state();
 }
 
 static void process_pending_commands(void) {
+    if (processing_commands) return;
+    processing_commands = true;
     ESP_LOGI(TAG, "process_pending: mode=%d, rock_start=%d, rock_stop=%d, connected=%d, chars=%d",
         pending_mode, pending_rock_start, pending_rock_stop, ble_connected, chars_discovered);
-    if (!ble_connected || !chars_discovered) return;
+    if (!ble_connected || !chars_discovered) {
+        processing_commands = false;
+        return;
+    }
     if (pending_mode > 0 && drive_mode_val_handle) {
         uint8_t m = pending_mode;
-        pending_mode = 0;
         ESP_LOGI(TAG, "Writing mode %d to handle %d (conn=%d)", m, drive_mode_val_handle, conn_handle);
         last_write_rc = ble_gattc_write_flat(conn_handle, drive_mode_val_handle, &m, 1, on_write, NULL);
         ESP_LOGI(TAG, "Write rc=%d", last_write_rc);
         if (last_write_rc == 0) {
+            pending_mode = 0;
             drive_mode = m;  // Update local state on successful write
+            save_drive_mode();
             mqtt_publish_state();
+        } else {
+            web_log_add("Mode write busy: rc=%d", last_write_rc);
         }
         vTaskDelay(pdMS_TO_TICKS(300));
     }
     if (pending_rock_start && rocking_val_handle) {
-        pending_rock_start = 0;
         // Format: [0x01, minutes (0=continuous), intensity%]
         uint8_t cmd[3] = {0x01, (uint8_t)rock_minutes, (uint8_t)rock_intensity};
         ESP_LOGI(TAG, "Rock start: %d min, %d%%", rock_minutes, rock_intensity);
-        ble_gattc_write_flat(conn_handle, rocking_val_handle, cmd, 3, on_write, NULL);
-        is_rocking = true;
-        rock_start_time = esp_timer_get_time() / 1000000;  // Set start time in seconds
+        last_write_rc = ble_gattc_write_flat(conn_handle, rocking_val_handle, cmd, 3, on_write, NULL);
+        ESP_LOGI(TAG, "Rock write rc=%d", last_write_rc);
+        if (last_write_rc == 0) {
+            pending_rock_start = 0;
+            is_rocking = true;
+            rock_start_time = esp_timer_get_time() / 1000000;  // Set start time in seconds
+            last_rock_notify_time = rock_start_time;
+        } else {
+            web_log_add("Rock start busy: rc=%d", last_write_rc);
+        }
     }
     if (pending_rock_stop && rocking_val_handle) {
-        pending_rock_stop = 0;
         uint8_t cmd = 0x00;
-        ble_gattc_write_flat(conn_handle, rocking_val_handle, &cmd, 1, on_write, NULL);
-        is_rocking = false;
+        last_write_rc = ble_gattc_write_flat(conn_handle, rocking_val_handle, &cmd, 1, on_write, NULL);
+        ESP_LOGI(TAG, "Rock stop rc=%d", last_write_rc);
+        if (last_write_rc == 0) {
+            pending_rock_stop = 0;
+            is_rocking = false;
+        } else {
+            web_log_add("Rock stop busy: rc=%d", last_write_rc);
+        }
     }
+    processing_commands = false;
 }
 
 static int on_chr(uint16_t ch, const struct ble_gatt_error *e, const struct ble_gatt_chr *c, void *arg) {
@@ -437,6 +527,7 @@ static void connect_to_priam(ble_addr_t *addr) {
         web_log_add("Connect failed: rc=%d", last_connect_rc);
         priam_found = false;
         have_candidate = false;
+        auto_start_sent = false;
     }
 }
 
@@ -528,6 +619,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 if (mode >= 1 && mode <= 3 && drive_mode != mode) {
                     drive_mode = mode;
                     ESP_LOGI(TAG, "Mode notify: %d", drive_mode);
+                    save_drive_mode();
                     mqtt_publish_state();
                 }
             } else if (attr_handle == rocking_val_handle && len >= 3) {
@@ -537,6 +629,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 int time_left = data[1] | (data[2] << 8);
                 bool was_rocking = is_rocking;
                 is_rocking = (intensity > 0 || time_left > 0);
+                last_rock_notify_time = esp_timer_get_time() / 1000000;
                 ESP_LOGI(TAG, "Rock notify: intensity=%d, time_left=%d", intensity, time_left);
                 if (is_rocking != was_rocking) mqtt_publish_state();
             }
@@ -549,6 +642,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
             ble_connected = false;
             priam_found = false;
             have_candidate = false;
+            auto_start_sent = false;
             chars_discovered = false;
             battery_percent = -1;
             battery_leds = -1;
@@ -628,7 +722,6 @@ static void ble_init(void) {
     if (nimble_port_init() != ESP_OK) return;
     ble_hs_cfg.sync_cb = ble_on_sync;
     ble_hs_cfg.reset_cb = ble_on_reset;
-    ble_svc_gap_device_name_set("EPriam-Bridge");
     nimble_port_freertos_init(ble_host_task);
 }
 
@@ -643,6 +736,15 @@ static void auto_renew_task(void *arg) {
             int remaining = (auto_renew_duration * 60) - (int)elapsed;
             
             ESP_LOGI(TAG, "Auto-renew check: elapsed=%llds, remaining=%ds", elapsed, remaining);
+
+            if (last_rock_notify_time > 0 && (now - last_rock_notify_time) > ROCK_NOTIFY_TIMEOUT_SEC) {
+                ESP_LOGW(TAG, "No rock notifications for %llds, retrying start", now - last_rock_notify_time);
+                web_log_add("Rock notify timeout, retrying");
+                last_rock_notify_time = now;
+                pending_rock_start = 1;
+                process_pending_commands();
+                mqtt_publish_state();
+            }
             
             // Renew when threshold minutes remaining
             if (remaining <= (auto_renew_threshold * 60) && remaining > 0) {
@@ -653,6 +755,16 @@ static void auto_renew_task(void *arg) {
                 process_pending_commands();
                 mqtt_publish_state();
             }
+        }
+    }
+}
+
+static void pending_command_retry_task(void *arg) {
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(PENDING_COMMAND_RETRY_INTERVAL_MS));
+        if (ble_connected && chars_discovered &&
+            (pending_mode > 0 || pending_rock_start || pending_rock_stop)) {
+            process_pending_commands();
         }
     }
 }
@@ -894,6 +1006,7 @@ static void load_entity_names(void) {
     nvs_handle_t nvs;
     if (nvs_open("epriam", NVS_READONLY, &nvs) == ESP_OK) {
         size_t len;
+        int32_t stored_i32;
         len = sizeof(name_device); nvs_get_str(nvs, "n_device", name_device, &len);
         len = sizeof(name_battery); nvs_get_str(nvs, "n_battery", name_battery, &len);
         len = sizeof(name_rocking); nvs_get_str(nvs, "n_rocking", name_rocking, &len);
@@ -901,12 +1014,21 @@ static void load_entity_names(void) {
         len = sizeof(name_mode); nvs_get_str(nvs, "n_mode", name_mode, &len);
         len = sizeof(name_intensity); nvs_get_str(nvs, "n_intensity", name_intensity, &len);
         len = sizeof(name_connected); nvs_get_str(nvs, "n_connected", name_connected, &len);
+        if (nvs_get_i32(nvs, "autostart_en", &stored_i32) == ESP_OK) {
+            autostart_enabled = stored_i32 != 0;
+        }
+        if (nvs_get_i32(nvs, "autostart_int", &stored_i32) == ESP_OK) {
+            autostart_intensity = clamp_int(stored_i32, 0, 100);
+        }
+        if (nvs_get_i32(nvs, "drive_mode", &stored_i32) == ESP_OK && stored_i32 >= 1 && stored_i32 <= 3) {
+            drive_mode = stored_i32;
+        }
         nvs_close(nvs);
-        ESP_LOGI(TAG, "Loaded entity names from NVS");
+        ESP_LOGI(TAG, "Loaded config from NVS");
     }
 }
 
-// Save entity names to NVS
+// Save entity names and autostart settings to NVS
 static void save_entity_names(void) {
     nvs_handle_t nvs;
     if (nvs_open("epriam", NVS_READWRITE, &nvs) == ESP_OK) {
@@ -917,9 +1039,11 @@ static void save_entity_names(void) {
         nvs_set_str(nvs, "n_mode", name_mode);
         nvs_set_str(nvs, "n_intensity", name_intensity);
         nvs_set_str(nvs, "n_connected", name_connected);
+        nvs_set_i32(nvs, "autostart_en", autostart_enabled ? 1 : 0);
+        nvs_set_i32(nvs, "autostart_int", clamp_int(autostart_intensity, 0, 100));
         nvs_commit(nvs);
         nvs_close(nvs);
-        ESP_LOGI(TAG, "Saved entity names to NVS");
+        ESP_LOGI(TAG, "Saved config to NVS");
     }
 }
 
@@ -939,15 +1063,26 @@ static void mqtt_init(void) {
     }
 }
 
+static void save_drive_mode(void) {
+    if (drive_mode < 1 || drive_mode > 3) return;
+    nvs_handle_t nvs;
+    if (nvs_open("epriam", NVS_READWRITE, &nvs) == ESP_OK) {
+        nvs_set_i32(nvs, "drive_mode", drive_mode);
+        nvs_commit(nvs);
+        nvs_close(nvs);
+    }
+}
+
 static esp_err_t root_handler(httpd_req_t *req) {
     char batt[16];
     if (battery_percent >= 0) snprintf(batt, 16, "%d%%", battery_percent);
     else strcpy(batt, "?");
     
     const char* mode = drive_mode == 1 ? "ECO" : drive_mode == 2 ? "TOUR" : drive_mode == 3 ? "BOOST" : "?";
-    const char* auto_status = auto_renew_enabled ? "on" : "off";
+    const char* rock_status = auto_renew_enabled ? "Auto" : is_rocking ? "On" : "Off";
+    const char* rock_status_class = is_rocking ? "on" : "off";
     
-    static char r[3400];
+    static char r[4096];
     snprintf(r, sizeof(r),
         "<!DOCTYPE html><html><head><meta charset=UTF-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
         "<title>E-Priam</title><style>*{box-sizing:border-box}body{font-family:Arial;max-width:400px;margin:auto;padding:10px;background:#1a1a2e;color:#eee}"
@@ -961,8 +1096,8 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<div class=si><b class=%s>●</b><small>BLE</small></div>"
         "<div class=si><b class=%s>●</b><small>MQTT</small></div>"
         "<div class=si><b>🔋%s</b><small>Battery</small></div>"
-        "<div class=si><b>%s</b><small>Mode</small></div>"
-        "<div class=si><b class=%s>∞</b><small>Auto</small></div>"
+        "<div class=si><b id=mode>%s</b><small>Drive</small></div>"
+        "<div class=si><b id=rockstate class=%s>%s</b><small>Rocking</small></div>"
         "</div></div>"
         "<div class=c id=rockbox style='text-align:center;display:none'><div id=cd>--:--</div><small>Remaining</small></div>"
         "<div class=c><b class=b style=background:#4CAF50 onclick=\"fetch('/api/mode/eco').then(st)\">ECO</b>"
@@ -978,13 +1113,13 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<b class=b style=background:#666 onclick=\"fetch('/api/rock/stop').then(st)\">Stop</b></div>"
         "<div class=c>%s<a href=/config>⚙ Config</a> <a href=/ota style=float:right>🔄 OTA</a></div>"
         "<div class=c><b>BLE Log:</b><div id=log>Loading...</div></div>"
-        "<script>var ar=%s;function st(){fetch('/api/status').then(r=>r.json()).then(d=>{rs=d.remaining_sec;rk=d.rocking;ar=d.auto_renew;"
-        "document.getElementById('rockbox').style.display=rk?'block':'none';document.getElementById('abtn').style.background=ar?'#4CAF50':'#FF9800';upcd()})}"
+        "<script>var ar=%s;function mt(m){return m==1?'ECO':m==2?'TOUR':m==3?'BOOST':'?'}function rt(d){return d.auto_renew?'Auto':d.rocking?'On':'Off'}function st(){fetch('/api/status').then(r=>r.json()).then(d=>{rs=d.remaining_sec;rk=d.rocking;ar=d.auto_renew;"
+        "document.getElementById('mode').textContent=mt(d.drive_mode);let rr=document.getElementById('rockstate');rr.textContent=rt(d);rr.className=d.rocking?'on':'off';document.getElementById('rockbox').style.display=rk?'block':'none';document.getElementById('abtn').style.background=ar?'#4CAF50':'#FF9800';upcd()})}"
         "var rs=0,rk=false;function upcd(){if(!rk||rs<=0){document.getElementById('cd').textContent='--:--';return;}"
         "var m=Math.floor(rs/60),s=rs%%60;document.getElementById('cd').textContent=m+':'+(s<10?'0':'')+s}"
         "function upd(){fetch('/api/log').then(r=>r.text()).then(t=>{document.getElementById('log').textContent=t})}"
         "st();upd();setInterval(()=>{if(rk&&rs>0){rs--;upcd()}},1000);setInterval(st,10000);setInterval(upd,5000)</script></body></html>",
-        ble_connected ? "on" : "off", mqtt_connected ? "on" : "off", batt, mode, auto_status,
+        ble_connected ? "on" : "off", mqtt_connected ? "on" : "off", batt, mode, rock_status_class, rock_status,
         auto_renew_enabled ? "#4CAF50" : "#FF9800",
         ble_connected ? "" : "<b class=b style=background:#FF5722 onclick=\"fetch('/api/rescan').then(()=>setTimeout(()=>location.reload(),3000))\">🔍 Scan</b>",
         auto_renew_enabled ? "true" : "false");
@@ -1144,14 +1279,9 @@ static esp_err_t api_rock_autorenew(httpd_req_t *req) {
             if (i >= 0 && i <= 100) rock_intensity = i;
         }
     }
-    rock_minutes = 30;  // Start with 30 min
-    auto_renew_enabled = true;
-    rock_start_time = esp_timer_get_time() / 1000000;  // Current time in seconds
-    pending_rock_start = 1;
-    if (ble_connected && chars_discovered) process_pending_commands();
-    mqtt_publish_state();
+    start_auto_renew_rocking("web");
     char resp[100];
-    snprintf(resp, 100, "{\"ok\":true,\"autorenew\":true,\"duration\":30,\"threshold\":10,\"intensity\":%d}", rock_intensity);
+    snprintf(resp, 100, "{\"ok\":true,\"autorenew\":true,\"duration\":%d,\"threshold\":10,\"intensity\":%d}", AUTO_START_MINUTES, rock_intensity);
     httpd_resp_set_type(req, "application/json");
     httpd_resp_sendstr(req, resp);
     return ESP_OK;
@@ -1176,19 +1306,25 @@ static esp_err_t api_disconnect(httpd_req_t *req) {
 
 // Config page - entity name settings
 static esp_err_t config_handler(httpd_req_t *req) {
-    static char html[3072];
+    static char html[4096];
     snprintf(html, sizeof(html),
         "<!DOCTYPE html><html><head><meta charset=UTF-8><meta name=viewport content=\"width=device-width,initial-scale=1\">"
         "<title>Configuration</title><style>*{box-sizing:border-box}body{font-family:Arial;max-width:400px;margin:auto;padding:10px;background:#1a1a2e;color:#eee}"
         "input{width:100%%;padding:8px;margin:4px 0;border-radius:4px;border:1px solid #444;background:#16213e;color:#eee}"
+        "input[type=checkbox]{width:auto;margin-right:8px}.row{display:flex;align-items:center;margin-top:10px;color:#eee}"
         ".b{padding:12px 20px;margin:10px 0;border:none;border-radius:6px;cursor:pointer;background:#4CAF50;color:white;width:100%%}"
         ".info{background:#16213e;padding:12px;border-radius:6px;margin-bottom:15px;font-size:13px;line-height:1.5}"
+        ".section{border-top:1px solid #333;margin-top:18px;padding-top:12px}"
         "label{display:block;margin-top:10px;font-size:13px;color:#888}"
         "</style></head><body><h2>⚙️ Configuration</h2>"
         "<div class=info>These names are used for Home Assistant MQTT discovery. "
         "Change them to customize how entities appear in HA. For example, use your language or add room names. "
         "Changes take effect after saving and will update entity names in Home Assistant.</div>"
         "<form action=/api/config method=POST>"
+        "<div class=section><h3>Automatic Rocking</h3>"
+        "<label class=row><input type=checkbox name=autostart_enabled value=1 %s>Start rocking automatically after stroller connect</label>"
+        "<label>Automatic rocking intensity:</label><input type=number name=autostart_intensity min=0 max=100 step=1 value=\"%d\"></div>"
+        "<div class=section><h3>Home Assistant Names</h3>"
         "<label>Device name:</label><input name=device value=\"%s\" placeholder=\"e.g. Cybex E-Priam\">"
         "<label>Battery sensor:</label><input name=battery value=\"%s\" placeholder=\"e.g. Battery\">"
         "<label>Rocking switch:</label><input name=rocking value=\"%s\" placeholder=\"e.g. Rocking\">"
@@ -1196,8 +1332,9 @@ static esp_err_t config_handler(httpd_req_t *req) {
         "<label>Drive mode select:</label><input name=mode value=\"%s\" placeholder=\"e.g. Mode\">"
         "<label>Intensity number:</label><input name=intensity value=\"%s\" placeholder=\"e.g. Intensity\">"
         "<label>Connection status:</label><input name=connected value=\"%s\" placeholder=\"e.g. Connected\">"
-        "<button class=b type=submit>💾 Save</button></form>"
+        "</div><button class=b type=submit>💾 Save</button></form>"
         "<a href=/><button class=b style=background:#666>← Back</button></a></body></html>",
+        autostart_enabled ? "checked" : "", clamp_int(autostart_intensity, 0, 100),
         name_device, name_battery, name_rocking, name_autorenew, name_mode, name_intensity, name_connected);
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, html, strlen(html));
@@ -1233,6 +1370,11 @@ static esp_err_t api_config_post(httpd_req_t *req) {
     if (len > 0) {
         buf[len] = 0;
         char val[32], decoded[32];
+
+        autostart_enabled = httpd_query_key_value(buf, "autostart_enabled", val, sizeof(val)) == ESP_OK;
+        if (httpd_query_key_value(buf, "autostart_intensity", val, sizeof(val)) == ESP_OK) {
+            autostart_intensity = clamp_int(atoi(val), 0, 100);
+        }
         
         if (httpd_query_key_value(buf, "device", val, sizeof(val)) == ESP_OK) {
             url_decode(decoded, val, sizeof(decoded));
@@ -1442,6 +1584,13 @@ static void start_webserver(void) {
     }
 }
 
+static void wifi_services_task(void *arg) {
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+    start_webserver();
+    mqtt_init();
+    vTaskDelete(NULL);
+}
+
 void app_main(void) {
     ESP_LOGI(TAG, "E-Priam Bridge v2.1 + MQTT");
     esp_err_t ret = nvs_flash_init();
@@ -1451,13 +1600,12 @@ void app_main(void) {
     }
     load_entity_names();
     wifi_init();
-    xEventGroupWaitBits(s_wifi_event_group, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    start_webserver();
-    mqtt_init();
     ble_init();
     
     // Start auto-renew monitoring task
     xTaskCreate(auto_renew_task, "autorenew", 2048, NULL, 5, NULL);
+    xTaskCreate(pending_command_retry_task, "cmdretry", 2048, NULL, 5, NULL);
+    xTaskCreate(wifi_services_task, "wifisvc", 4096, NULL, 5, NULL);
     
     ESP_LOGI(TAG, "Ready!");
 }
