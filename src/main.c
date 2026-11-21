@@ -101,6 +101,15 @@ static bool is_rocking = false;
 static volatile int pending_mode = 0;
 static volatile int pending_rock_start = 0;
 static volatile int pending_rock_stop = 0;
+// Rocking command format:
+//   0 = [0x01, minutes, intensity%]  (original description, default)
+//   1 = [level, secs_lo, secs_hi]    as observed on a first-generation e-Priam
+//       ("Version 3", ~2019-2022): level 1 = high, 2 = medium, 3 = low,
+//       duration in seconds (little endian). See README.
+#ifndef EPRIAM_ROCK_FORMAT_LEVEL_SECS
+#define EPRIAM_ROCK_FORMAT_LEVEL_SECS 0
+#endif
+
 static volatile int rock_minutes = 5;      // 0 = continuous, 1-30 = timer
 static volatile int rock_intensity = 100;  // 0-100%
 
@@ -351,7 +360,8 @@ static void process_pending_commands(void) {
     }
     if (pending_rock_start && rocking_val_handle) {
         pending_rock_start = 0;
-        // Format (verified against the official app): [level, secs_lo, secs_hi]
+#if EPRIAM_ROCK_FORMAT_LEVEL_SECS
+        // Format observed on a first-generation e-Priam: [level, secs_lo, secs_hi]
         //   level: 1 = high, 2 = medium, 3 = low (the app's three intensity levels)
         //   secs:  total rocking duration in seconds, little endian (app max 1800)
         // The 0-100 % intensity setting is mapped onto the three levels.
@@ -362,6 +372,11 @@ static void process_pending_commands(void) {
         if (secs > 0xFFFF) secs = 0xFFFF;
         uint8_t cmd[3] = {level, (uint8_t)(secs & 0xFF), (uint8_t)(secs >> 8)};
         ESP_LOGI(TAG, "Rock start: %d min (%lu s), %d%% -> level %d", rock_minutes, (unsigned long)secs, rock_intensity, level);
+#else
+        // Format: [0x01, minutes (0=continuous), intensity%]
+        uint8_t cmd[3] = {0x01, (uint8_t)rock_minutes, (uint8_t)rock_intensity};
+        ESP_LOGI(TAG, "Rock start: %d min, %d%%", rock_minutes, rock_intensity);
+#endif
         ble_gattc_write_flat(conn_handle, rocking_val_handle, cmd, 3, on_write, NULL);
         is_rocking = true;
         rock_start_time = esp_timer_get_time() / 1000000;  // Set start time in seconds
@@ -539,6 +554,7 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     mqtt_publish_state();
                 }
             } else if (attr_handle == rocking_val_handle && len >= 3) {
+#if EPRIAM_ROCK_FORMAT_LEVEL_SECS
                 // Parse ROCKING notification/read:
                 // [0x1L, left_lo, left_hi, total_lo, total_hi]
                 //   high nibble 1 = rocking, L = level (1 high, 2 medium, 3 low)
@@ -548,6 +564,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                 bool was_rocking = is_rocking;
                 is_rocking = ((data[0] >> 4) == 1) || time_left > 0;
                 ESP_LOGI(TAG, "Rock notify: level=%d, time_left=%d s", level, time_left);
+#else
+                // Parse ROCKING notification
+                // intensity = data[0] & 0xF, time_left = data[1] | (data[2] << 8)
+                int intensity = data[0] & 0x0F;
+                int time_left = data[1] | (data[2] << 8);
+                bool was_rocking = is_rocking;
+                is_rocking = (intensity > 0 || time_left > 0);
+                ESP_LOGI(TAG, "Rock notify: intensity=%d, time_left=%d", intensity, time_left);
+#endif
                 if (is_rocking != was_rocking) mqtt_publish_state();
             }
             break;
