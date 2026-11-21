@@ -351,9 +351,17 @@ static void process_pending_commands(void) {
     }
     if (pending_rock_start && rocking_val_handle) {
         pending_rock_start = 0;
-        // Format: [0x01, minutes (0=continuous), intensity%]
-        uint8_t cmd[3] = {0x01, (uint8_t)rock_minutes, (uint8_t)rock_intensity};
-        ESP_LOGI(TAG, "Rock start: %d min, %d%%", rock_minutes, rock_intensity);
+        // Format (verified against the official app): [level, secs_lo, secs_hi]
+        //   level: 1 = high, 2 = medium, 3 = low (the app's three intensity levels)
+        //   secs:  total rocking duration in seconds, little endian (app max 1800)
+        // The 0-100 % intensity setting is mapped onto the three levels.
+        uint8_t level = rock_intensity > 66 ? 1 : (rock_intensity > 33 ? 2 : 3);
+        // 0 = "continuous": the old format happened to send intensity<<8 seconds
+        // (100 % -> 25600 s), so keep that behaviour by sending the maximum.
+        uint32_t secs = rock_minutes == 0 ? 0xFFFF : (uint32_t)rock_minutes * 60;
+        if (secs > 0xFFFF) secs = 0xFFFF;
+        uint8_t cmd[3] = {level, (uint8_t)(secs & 0xFF), (uint8_t)(secs >> 8)};
+        ESP_LOGI(TAG, "Rock start: %d min (%lu s), %d%% -> level %d", rock_minutes, (unsigned long)secs, rock_intensity, level);
         ble_gattc_write_flat(conn_handle, rocking_val_handle, cmd, 3, on_write, NULL);
         is_rocking = true;
         rock_start_time = esp_timer_get_time() / 1000000;  // Set start time in seconds
@@ -531,13 +539,15 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg) {
                     mqtt_publish_state();
                 }
             } else if (attr_handle == rocking_val_handle && len >= 3) {
-                // Parse ROCKING notification
-                // intensity = data[0] & 0xF, time_left = data[1] | (data[2] << 8)
-                int intensity = data[0] & 0x0F;
+                // Parse ROCKING notification/read:
+                // [0x1L, left_lo, left_hi, total_lo, total_hi]
+                //   high nibble 1 = rocking, L = level (1 high, 2 medium, 3 low)
+                //   left/total = seconds, little endian; all zero when stopped
+                int level = data[0] & 0x0F;
                 int time_left = data[1] | (data[2] << 8);
                 bool was_rocking = is_rocking;
-                is_rocking = (intensity > 0 || time_left > 0);
-                ESP_LOGI(TAG, "Rock notify: intensity=%d, time_left=%d", intensity, time_left);
+                is_rocking = ((data[0] >> 4) == 1) || time_left > 0;
+                ESP_LOGI(TAG, "Rock notify: level=%d, time_left=%d s", level, time_left);
                 if (is_rocking != was_rocking) mqtt_publish_state();
             }
             break;
