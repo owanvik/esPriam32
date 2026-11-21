@@ -256,13 +256,26 @@ The E-Priam uses a Microchip RN4871 BLE module.
 |----------------|-------------|-------------|
 | Status | 0102 | Read status bytes |
 | Drive Mode | 0103 | Write-only: 1=ECO, 2=TOUR, 3=BOOST |
-| Rocking | 0104 | Write: [level, secs_lo, secs_hi] or [0x00]. Read/notify: [0x1L, left_lo, left_hi, total_lo, total_hi] |
+| Rocking | 0104 | Write: [0x01, minutes, intensity%] or [0x00] |
 | Battery LED | 0105 | Read: LED count (1-3) |
 
 ### Rocking Command Format
 
-Verified by reading the rocking characteristic while the official CYBEX app was rocking the
-stroller at each of its three intensity levels (10 min duration):
+```
+Start: [0x01, minutes, intensity]
+  - minutes: 0 = continuous, 1-30 = timer
+  - intensity: 0-100 percent
+
+Stop:  [0x00]
+```
+
+### Observed on a first-generation e-Priam ("Version 3", Swedish market, ~2019–2022, before the 2022 redesign)
+
+On this stroller the command above starts rocking, but intensity never changes and
+the duration is not interpreted as minutes. Reading the rocking characteristic while
+the official CYBEX app was rocking at each of its three intensity levels (10 min)
+showed a different format. It may differ between hardware/firmware versions, so
+please check against your own stroller.
 
 | App level | Read-back while rocking |
 |-----------|-------------------------|
@@ -283,11 +296,10 @@ Read / notify: [0x1L, left_lo, left_hi, total_lo, total_hi]
   - total: duration that was requested, little endian
 ```
 
-The previous description (`[0x01, minutes, intensity%]`) always selected the **high**
-level (first byte 0x01) and the stroller interpreted `minutes, intensity` as a 16-bit
-number of seconds – e.g. `[0x01, 30, 40]` was stored as 0x281E = 10270 s.
-The firmware still exposes intensity as 0-100 % and maps it to the three levels
-(0-33 low, 34-66 medium, 67-100 high).
+With `[0x01, minutes, intensity]` on this stroller, `0x01` selects the **high** level
+and `minutes, intensity` are read as a 16-bit number of seconds (e.g. `[0x01, 30, 40]`
+was stored as 0x281E = 10270 s). Verified with an ESPHome implementation sending the
+format above: all three levels and the duration match the app.
 
 ### Memory Usage
 
