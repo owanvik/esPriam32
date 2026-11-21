@@ -269,6 +269,38 @@ Start: [0x01, minutes, intensity]
 Stop:  [0x00]
 ```
 
+### Observed on a first-generation e-Priam ("Version 3", Swedish market, ~2019–2022, before the 2022 redesign)
+
+On this stroller the command above starts rocking, but intensity never changes and
+the duration is not interpreted as minutes. Reading the rocking characteristic while
+the official CYBEX app was rocking at each of its three intensity levels (10 min)
+showed a different format. It may differ between hardware/firmware versions, so
+please check against your own stroller.
+
+| App level | Read-back while rocking |
+|-----------|-------------------------|
+| Low       | `13 10 01 58 02` |
+| Medium    | `12 49 02 58 02` |
+| High      | `11 4D 02 58 02` |
+
+```
+Start: [level, secs_lo, secs_hi]
+  - level: 1 = high, 2 = medium, 3 = low
+  - secs:  total duration in seconds, little endian (600 s = 58 02, 1800 s = 08 07)
+
+Stop:  [0x00]
+
+Read / notify: [0x1L, left_lo, left_hi, total_lo, total_hi]
+  - 0x1L: high nibble 1 = rocking, L = level as above (00 when stopped)
+  - left:  seconds remaining, little endian (counts down)
+  - total: duration that was requested, little endian
+```
+
+With `[0x01, minutes, intensity]` on this stroller, `0x01` selects the **high** level
+and `minutes, intensity` are read as a 16-bit number of seconds (e.g. `[0x01, 30, 40]`
+was stored as 0x281E = 10270 s). Verified with an ESPHome implementation sending the
+format above: all three levels and the duration match the app.
+
 ### Memory Usage
 
 ```
